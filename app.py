@@ -20,10 +20,12 @@ class PinkSlip(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     slip_number = db.Column(db.String(100), unique=True, nullable=False)
-    customer_name = db.Column(db.String(100), nullable=False)
-    phone = db.Column(db.String(50))
-    date_received = db.Column(db.String(30))
-    due_date = db.Column(db.String(30))
+    first_initial = db.Column(db.String(5), nullable=False)
+    last_name = db.Column(db.String(100), nullable=False)
+    phone = db.Column(db.String(50), nullable=False)
+    date_received = db.Column(db.String(30), nullable=False)
+    due_date = db.Column(db.String(30), nullable=False)
+    due_time = db.Column(db.String(20), nullable=True)
     total_amount = db.Column(db.Float, default=0.0, nullable=False)
 
     items = db.relationship(
@@ -34,7 +36,7 @@ class PinkSlip(db.Model):
     )
 
     def __repr__(self):
-        return f"<PinkSlip {self.slip_number} - {self.customer_name}>"
+        return f"<PinkSlip {self.slip_number} - {self.first_initial}. {self.last_name}>"
 
 class PinkSlipItem(db.Model):
     __tablename__ = 'pink_slip_item'
@@ -48,22 +50,130 @@ class PinkSlipItem(db.Model):
     def __repr__(self):
         return f"<PinkSlipItem {self.id} - {self.item_type} - ${self.price}>"
 
+# date cleaner -> returns date in MM/DD/YYYY format
 def _format_date_val(val):
+    # return empty if values are missing
     if pd.isna(val) or val == '':
         return ''
     if isinstance(val, pd.Timestamp):
-        # include time only if present
+        return val.strftime('%m/%d/%Y')
+    # fallback for string values
+    try:
+        parsed = pd.to_datetime(val, format='%m/%d/%Y')
+        return parsed.strftime('%m/%d/%Y')
+    except Exception:
+        # try flexible parsing as fallback, still output MM/DD/YYYY
+        try:
+            parsed = pd.to_datetime(val)
+            return parsed.strftime('%m/%d/%Y')
+        except Exception:
+            return str(val)[:10]
+
+# time extractor -> returns time in 12 hour format
+def _format_time_val(val):
+    # return empty if values are missing
+    if pd.isna(val) or val == '':
+        return ''
+    if isinstance(val, pd.Timestamp):
+        # no time component if midnight
         if val.time().hour == 0 and val.time().minute == 0 and val.time().second == 0:
-            return val.strftime('%Y-%m-%d')
-        return val.strftime('%Y-%m-%d %H:%M')
-    # fallback: try to parse string-ish values
+            return ''
+        return val.strftime('%I:%M %p').lstrip('0')
+    # fallback for string values
     try:
         parsed = pd.to_datetime(val)
         if parsed.time().hour == 0 and parsed.time().minute == 0 and parsed.time().second == 0:
-            return parsed.strftime('%Y-%m-%d')
-        return parsed.strftime('%Y-%m-%d %H:%M')
+            return ''
+        return parsed.strftime('%I:%M %p').lstrip('0')
     except Exception:
-        return str(val)[:19]  # short fallback
+        return ''
+
+# format phone number to (XXX) XXX-XXXX, defaulting to 704 area code if given 7 digit phone number
+def _format_phone(phone_str):
+    if not phone_str or pd.isna(phone_str):
+        return ''
+    # strip all non digit characters
+    digits = ''.join(c for c in str(phone_str) if c.isdigit())
+    if not digits:
+        return ''
+    # if 7 digits, prepend 704 area code
+    if len(digits) == 7:
+        digits = '704' + digits
+    # if 10 digits, format as (XXX) XXX-XXXX
+    if len(digits) == 10:
+        return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
+    # if 11 digits starting with 1, strip the 1 and format
+    if len(digits) == 11 and digits[0] == '1':
+        digits = digits[1:]
+        return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
+    # return original if cant parse
+    return str(phone_str).strip()
+
+# convert any time string to 12 hour format (normalizes to __:__ AM or __:__ PM)
+def _convert_to_12hr(time_str):
+    if not time_str or pd.isna(time_str):
+        return ''
+    time_str = str(time_str).strip()
+    if not time_str:
+        return ''
+    # try parsing and normalizing (handles 2:30am, 2:30 am, 2:30Am, 14:30, etc.)
+    try:
+        parsed = pd.to_datetime(time_str)
+        return parsed.strftime('%I:%M %p').lstrip('0')
+    except Exception:
+        return time_str
+
+# valid item types for pink slips
+VALID_ITEM_TYPES = ['Shirt', 'Jeans', 'Dress', 'Jacket', 'Coat', 'Pants', 'Skirt', 'Shorts', 'Other']
+
+# common variations/misspellings mapped to valid types
+ITEM_TYPE_ALIASES = {
+    # Shirt variations
+    'shirts': 'Shirt', 'tshirt': 'Shirt', 't-shirt': 'Shirt', 'tee': 'Shirt', 'blouse': 'Shirt', 'top': 'Shirt',
+    # Jeans variations
+    'jean': 'Jeans', 'denim': 'Jeans',
+    # Dress variations
+    'dresses': 'Dress', 'gown': 'Dress',
+    # Jacket variations
+    'jackets': 'Jacket', 'blazer': 'Jacket',
+    # Coat variations
+    'coats': 'Coat', 'overcoat': 'Coat',
+    # Pants variations
+    'pant': 'Pants', 'trousers': 'Pants', 'slacks': 'Pants',
+    # Skirt variations
+    'skirts': 'Skirt',
+    # Shorts variations
+    'short': 'Shorts',
+    # Other variations
+    'misc': 'Other', 'miscellaneous': 'Other', 'etc': 'Other',
+}
+
+def _normalize_item_type(item_type_str):
+    """Normalize item type to valid category. Returns (normalized_type, is_valid)."""
+    if not item_type_str or pd.isna(item_type_str):
+        return None, False
+
+    item_type_str = str(item_type_str).strip()
+    if not item_type_str:
+        return None, False
+
+    # check exact match (case-insensitive)
+    for valid_type in VALID_ITEM_TYPES:
+        if item_type_str.lower() == valid_type.lower():
+            return valid_type, True
+
+    # check aliases
+    lower_input = item_type_str.lower()
+    if lower_input in ITEM_TYPE_ALIASES:
+        return ITEM_TYPE_ALIASES[lower_input], True
+
+    # check if input starts with or contains a valid type
+    for valid_type in VALID_ITEM_TYPES:
+        if lower_input.startswith(valid_type.lower()) or valid_type.lower() in lower_input:
+            return valid_type, True
+
+    # unrecognized - return None to indicate invalid
+    return None, False
 
 @app.route("/")
 def home():
@@ -73,13 +183,19 @@ def home():
         <input type="file" name="file">
         <input type="submit" value="Upload CSV/Excel">
     </form>
+    <br>
+    <a href="/records"><button type="button">View All Records</button></a>
     """
 
 @app.route("/upload", methods=["POST"])
 def upload():
     file = request.files.get('file')
     if not file:
-        return "No file uploaded", 400
+        return """
+        <h1>Error: No File Uploaded</h1>
+        <p>Please select a file before uploading.</p>
+        <a href="/"><button type="button">Back to Upload</button></a>
+        """, 400
 
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
     file.save(filepath)
@@ -97,30 +213,80 @@ def upload():
     duplicates_skipped = 0
     rows_skipped = 0
 
+    # validation errors (per user instructions)
+    error_rows = []  # list of dicts: {row, slip_number, error}
+
     # cache tickets processed in this upload to avoid repeated DB queries
     tickets_cache = {}
 
-    for _, row in df.iterrows():
+    # iterate with Excel-style row numbers: idx is dataframe index (0-based for first data row)
+    for idx, row in df.iterrows():
+        row_number = idx + 2  # +2 accounts for header row and 0-index
+
+        # Read raw values first (do NOT normalize/convert dates yet)
         slip_number = str(row.get('slip_number', '')).strip()
+        first_initial = str(row.get('first_initial', '')).strip().upper()[:1]
+        last_name = str(row.get('last_name', '')).strip()
+        phone = _format_phone(row.get('phone', ''))
+        item_type_raw = str(row.get('item_type', '')).strip()
+        other_item_desc = str(row.get('other_item_desc', '')).strip()
+        price_raw = str(row.get('price', '')).strip()
+        date_received_raw = row.get('date_received', '')
+        due_date_raw = row.get('due_date', '')
+        due_time_raw = row.get('due_time', '')
+
+        # Validation block: must occur before any ticket lookup, duplicate detection, or item creation
+
+        # slip_number required
         if not slip_number:
             rows_skipped += 1
+            error_rows.append({
+                "row": row_number,
+                "slip_number": "",
+                "error": "Missing slip_number"
+            })
             continue
 
-        # normalize dates
-        date_received = _format_date_val(row.get('date_received', ''))
-        due_date = _format_date_val(row.get('due_date', ''))
+        # item_type required and must be valid
+        item_type, item_type_valid = _normalize_item_type(item_type_raw)
+        if not item_type_valid:
+            rows_skipped += 1
+            error_rows.append({
+                "row": row_number,
+                "slip_number": slip_number,
+                "error": f"Invalid item_type: '{item_type_raw}'. Valid types: {', '.join(VALID_ITEM_TYPES)}"
+            })
+            continue
 
-        customer_name = str(row.get('customer_name', '')).strip()
-        phone = str(row.get('phone', '')).strip()
-        item_type = str(row.get('item_type', '')).strip()
-        other_item_desc = str(row.get('other_item_desc', '')).strip()
-
-        # price must be float and required for item
-        price_raw = row.get('price', '')
+        # price must parse and be non-negative
         try:
-            price = float(price_raw) if price_raw != '' else 0.0
+            price = float(price_raw)
         except Exception:
-            price = 0.0
+            rows_skipped += 1
+            error_rows.append({
+                "row": row_number,
+                "slip_number": slip_number,
+                "error": "Invalid price format"
+            })
+            continue
+
+        if price < 0:
+            rows_skipped += 1
+            error_rows.append({
+                "row": row_number,
+                "slip_number": slip_number,
+                "error": "Negative price not allowed"
+            })
+            continue
+
+        # All validations passed for this row now normalize dates and proceed
+        date_received = _format_date_val(date_received_raw)
+        due_date = _format_date_val(due_date_raw)
+        # Use explicit due_time column if provided, otherwise extract from due_date
+        if due_time_raw and str(due_time_raw).strip():
+            due_time = _convert_to_12hr(due_time_raw)
+        else:
+            due_time = _format_time_val(due_date_raw)
 
         # get or create ticket (cache per slip_number)
         ticket = tickets_cache.get(slip_number)
@@ -129,24 +295,30 @@ def upload():
             if ticket is None:
                 ticket = PinkSlip(
                     slip_number=slip_number,
-                    customer_name=customer_name or 'Unknown',
+                    first_initial=first_initial or '?',
+                    last_name=last_name or 'Unknown',
                     phone=phone,
                     date_received=date_received,
                     due_date=due_date,
+                    due_time=due_time,
                     total_amount=0.0
                 )
                 db.session.add(ticket)
                 tickets_created += 1
             else:
                 # update contact/dates only if they are empty on the ticket and provided in CSV
-                if customer_name and not ticket.customer_name:
-                    ticket.customer_name = customer_name
+                if first_initial and not ticket.first_initial:
+                    ticket.first_initial = first_initial
+                if last_name and not ticket.last_name:
+                    ticket.last_name = last_name
                 if phone and not ticket.phone:
                     ticket.phone = phone
                 if date_received and not ticket.date_received:
                     ticket.date_received = date_received
                 if due_date and not ticket.due_date:
                     ticket.due_date = due_date
+                if due_time and not ticket.due_time:
+                    ticket.due_time = due_time
             tickets_cache[slip_number] = ticket
 
         # Optional duplicate item check per ticket:
@@ -162,10 +334,10 @@ def upload():
             duplicates_skipped += 1
             continue
 
-        # create item and attach to ticket
+        # create item and attach to ticket using validated item_type and price (no fallback)
         item = PinkSlipItem(
             slip=ticket,
-            item_type=item_type or 'Other',
+            item_type=item_type,
             other_item_desc=other_item_desc,
             price=price
         )
@@ -173,9 +345,7 @@ def upload():
         items_imported += 1
 
     # After adding all items, update total_amount for each ticket
-    # Note: ticket.items will reflect newly added items because of relationship
     for ticket in tickets_cache.values():
-        # compute sum of prices for items currently associated with the ticket
         total = 0.0
         for it in ticket.items:
             try:
@@ -192,23 +362,77 @@ def upload():
         db.session.rollback()
         return "Database integrity error during import. No changes were committed.", 500
 
-    return (
-        f"Import complete: {tickets_created} tickets created, "
+    # Build HTML response with import summary and rejected rows table
+    html = "<h1>Upload Results</h1>"
+    html += '<a href="/"><button type="button">Upload Another File</button></a> '
+    html += '<a href="/records"><button type="button">View All Records</button></a>'
+    html += (
+        f"<p><b>Import complete:</b> {tickets_created} tickets created, "
         f"{items_imported} items imported, {duplicates_skipped} duplicate items skipped, "
-        f"{rows_skipped} rows skipped (missing slip_number)."
+        f"{rows_skipped} rows rejected.</p>"
     )
+
+    if error_rows:
+        html += "<h3>Rejected Rows</h3>"
+        html += "<table border='1' cellpadding='5'>"
+        html += "<tr><th>Row</th><th>Slip Number</th><th>Error</th></tr>"
+        for err in error_rows:
+            html += (
+                f"<tr>"
+                f"<td>{err['row']}</td>"
+                f"<td>{err['slip_number']}</td>"
+                f"<td>{err['error']}</td>"
+                f"</tr>"
+            )
+        html += "</table>"
+
+    return html
 
 @app.route("/records")
 def records():
-    tickets = PinkSlip.query.order_by(PinkSlip.slip_number).all()
-    if not tickets:
-        return "No records found."
+    # Get search query from URL parameters
+    search_query = request.args.get('search', '').strip()
+
+    # Start with all tickets
+    query = PinkSlip.query
+
+    # Apply search filter if provided
+    if search_query:
+        search_filter = (
+            PinkSlip.slip_number.ilike(f'%{search_query}%') |
+            PinkSlip.first_initial.ilike(f'%{search_query}%') |
+            PinkSlip.last_name.ilike(f'%{search_query}%') |
+            PinkSlip.phone.ilike(f'%{search_query}%')
+        )
+        query = query.filter(search_filter)
+
+    tickets = query.order_by(PinkSlip.slip_number).all()
 
     html = "<h1>All Tickets</h1>"
+    html += '<a href="/"><button type="button">Back to Upload</button></a><br><br>'
+
+    # Add search form
+    html += '''
+    <form method="GET" action="/records">
+        <input type="text" name="search" placeholder="Search by slip number, customer, or phone"
+               value="{}" size="40">
+        <input type="submit" value="Search">
+        <a href="/records"><button type="button">Clear Search</button></a>
+    </form>
+    <br>
+    '''.format(search_query)
+
+    if search_query:
+        html += f"<p><i>Showing results for: '{search_query}' ({len(tickets)} ticket(s) found)</i></p>"
+
+    if not tickets:
+        return html + "<p>No records found.</p>"
+
     for t in tickets:
         html += (
-            f"<h2>Ticket: {t.slip_number} | Customer: {t.customer_name} | Phone: {t.phone}</h2>"
-            f"<p>Date Received: {t.date_received or 'N/A'} | Due: {t.due_date or 'N/A'} | Total: ${t.total_amount:.2f}</p>"
+            f"<h2>Ticket: {t.slip_number} | Customer: {t.first_initial}. {t.last_name} | Phone: {t.phone}</h2>"
+            f"<p>Date Received: {t.date_received or 'N/A'} | Due: {t.due_date or 'N/A'}"
+            f"{(' at ' + t.due_time) if t.due_time else ''} | Total: ${t.total_amount:.2f}</p>"
         )
         html += "<ul>"
         for it in t.items:
