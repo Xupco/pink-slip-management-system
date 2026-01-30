@@ -44,7 +44,7 @@ class PinkSlipItem(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     slip_id = db.Column(db.Integer, db.ForeignKey('pink_slip.id'), nullable=False)
     item_type = db.Column(db.String(100), nullable=False)
-    other_item_desc = db.Column(db.String(500))
+    work_description = db.Column(db.String(500))
     price = db.Column(db.Float, nullable=False)
 
     def __repr__(self):
@@ -234,8 +234,8 @@ def upload():
         last_name = str(row.get('last_name', '')).strip()
         phone = _format_phone(row.get('phone', ''))
         item_type_raw = str(row.get('item_type', '')).strip()
-        other_item_desc = str(row.get('other_item_desc', '')).strip()
-        price_raw = str(row.get('price', '')).strip()
+        work_description = str(row.get('work_description', '')).strip()
+        price_raw = str(row.get('price', '')).strip().replace('$', '').replace(',', '')
         date_received_raw = row.get('date_received', '')
         due_date_raw = row.get('due_date', '')
         due_time_raw = row.get('due_time', '')
@@ -330,7 +330,7 @@ def upload():
         duplicate_found = False
         for existing_item in ticket.items:
             if (existing_item.item_type == item_type and
-                (existing_item.other_item_desc or '') == (other_item_desc or '') and
+                (existing_item.work_description or '') == (work_description or '') and
                 float(existing_item.price) == float(price)):
                 duplicate_found = True
                 break
@@ -343,7 +343,7 @@ def upload():
         item = PinkSlipItem(
             slip=ticket,
             item_type=item_type,
-            other_item_desc=other_item_desc,
+            work_description=work_description,
             price=price
         )
         db.session.add(item)
@@ -441,8 +441,8 @@ def records():
         )
         html += "<ul>"
         for it in t.items:
-            other = f" - {it.other_item_desc}" if it.other_item_desc else ""
-            html += f"<li>{it.item_type}{other} - ${it.price:.2f}</li>"
+            desc = f" - {it.work_description}" if it.work_description else ""
+            html += f"<li>{it.item_type}{desc} - ${it.price:.2f}</li>"
         html += "</ul>"
 
     return html
@@ -450,7 +450,7 @@ def records():
 @app.route("/add_pink_slip", methods=["GET", "POST"])
 def add_pink_slip():
     if request.method == "POST":
-        # Collect form data
+        # collect slip-level form data
         slip_number = request.form.get("slip_number", "").strip()
         first_initial = request.form.get("first_initial", "").strip().upper()[:1]
         last_name = request.form.get("last_name", "").strip()
@@ -458,24 +458,31 @@ def add_pink_slip():
         date_received = _format_date_val(request.form.get("date_received", ""))
         due_date = _format_date_val(request.form.get("due_date", ""))
         due_time = _convert_to_12hr(request.form.get("due_time", ""))
-        item_type_raw = request.form.get("item_type", "").strip()
-        other_item_desc = request.form.get("other_item_desc", "").strip()
-        price_raw = request.form.get("price", "").strip()
 
-        # Validate item type
-        item_type, item_type_valid = _normalize_item_type(item_type_raw)
-        if not item_type_valid:
-            return f"Invalid item type. Valid options: {', '.join(VALID_ITEM_TYPES)}", 400
+        # collect multiple items from form (sent as parallel lists)
+        item_types_raw = request.form.getlist("item_type")
+        work_descriptions = request.form.getlist("work_description")
+        prices_raw = request.form.getlist("price")
 
-        # Validate price
-        try:
-            price = float(price_raw)
-            if price < 0:
-                raise ValueError
-        except ValueError:
-            return "Invalid price. Must be a positive number.", 400
+        if not item_types_raw:
+            return "At least one item is required.", 400
 
-        # Create ticket if it doesn't exist
+        # validate all items before committing anything
+        validated_items = []
+        for i, (it_raw, wd, pr) in enumerate(zip(item_types_raw, work_descriptions, prices_raw), start=1):
+            item_type, item_type_valid = _normalize_item_type(it_raw.strip())
+            if not item_type_valid:
+                return f"Item {i}: Invalid item type. Valid options: {', '.join(VALID_ITEM_TYPES)}", 400
+            price_clean = pr.strip().replace('$', '').replace(',', '')
+            try:
+                price = float(price_clean)
+                if price < 0:
+                    raise ValueError
+            except ValueError:
+                return f"Item {i}: Invalid price. Must be a positive number.", 400
+            validated_items.append((item_type, wd.strip(), price))
+
+        # create ticket if it doesnt exist
         ticket = PinkSlip.query.filter_by(slip_number=slip_number).first()
         if not ticket:
             ticket = PinkSlip(
@@ -490,39 +497,67 @@ def add_pink_slip():
             )
             db.session.add(ticket)
 
-        # Add item
-        item = PinkSlipItem(
-            slip=ticket,
-            item_type=item_type,
-            other_item_desc=other_item_desc,
-            price=price
-        )
-        db.session.add(item)
+        # add all items
+        for item_type, work_description, price in validated_items:
+            item = PinkSlipItem(
+                slip=ticket,
+                item_type=item_type,
+                work_description=work_description,
+                price=price
+            )
+            db.session.add(item)
 
-        # Update total amount
+        # update total amount
         ticket.total_amount = sum(it.price for it in ticket.items)
         db.session.commit()
 
-        return f"Pink slip {slip_number} added successfully! <a href='/records'>View Records</a>"
+        return f"Pink slip {slip_number} added successfully with {len(validated_items)} item(s)! <a href='/records'>View Records</a>"
 
-    # GET method: show form
-    return """
+    item_options = ''.join(f'<option value="{t}">{t}</option>' for t in VALID_ITEM_TYPES)
+
+    return f"""
     <h1>Add Pink Slip</h1>
     <form method="POST">
-        Slip Number: <input type="text" name="slip_number" required><br>
-        First Initial: <input type="text" name="first_initial" maxlength="1"><br>
-        Last Name: <input type="text" name="last_name"><br>
-        Phone: <input type="text" name="phone"><br>
-        Date Received (MM/DD/YYYY): <input type="text" name="date_received"><br>
-        Due Date (MM/DD/YYYY): <input type="text" name="due_date"><br>
-        Due Time (HH:MM AM/PM): <input type="text" name="due_time"><br>
-        Item Type: <input type="text" name="item_type" required><br>
-        Other Item Description: <input type="text" name="other_item_desc"><br>
-        Price: <input type="text" name="price" required><br>
+        <fieldset>
+            <legend>Slip Info</legend>
+            Slip Number: <input type="text" name="slip_number" inputmode="numeric" pattern="\d{6}" maxlength="6" oninput="this.value=this.value.replace(/\D/g,'')" required><br>
+            First Initial: <input type="text" name="first_initial" maxlength="1" pattern="[A-Za-z]" title="One letter only" oninput="this.value=this.value.replace(/[^A-Za-z]/g,'')" required><br>
+            Last Name: <input type="text" name="last_name" pattern="[A-Za-z \\-']+" title="Letters, spaces, hyphens, and apostrophes only" oninput="this.value=this.value.replace(/[^A-Za-z \\-']/g,'')" required><br>
+            Phone: <input type="text" name="phone" pattern="[0-9()\\- ]+" title="Numbers, parentheses, and dashes only" oninput="this.value=this.value.replace(/[^0-9()\\- ]/g,'')" required><br>
+            Date Received: <input type="date" name="date_received" required><br>
+            Due Date: <input type="date" name="due_date" required><br>
+            Due Time: <input type="time" name="due_time"><br>
+        </fieldset>
+        <fieldset>
+            <legend>Items</legend>
+            <div id="items-container">
+                <div class="item-row">
+                    Item Type: <select name="item_type" required>{item_options}</select>
+                    Work Description: <input type="text" name="work_description">
+                    Price: <input type="text" name="price" inputmode="decimal" oninput="this.value=this.value.replace(/[^0-9.]/g,'')" required>
+                </div>
+            </div>
+            <br>
+            <button type="button" onclick="addItem()">+ Add Another Item</button>
+        </fieldset>
+        <br>
         <input type="submit" value="Add Pink Slip">
     </form>
     <br>
     <a href="/"><button type="button">Back to Home</button></a>
+    <script>
+    function addItem() {{
+        var container = document.getElementById('items-container');
+        var row = document.createElement('div');
+        row.className = 'item-row';
+        row.style.marginTop = '8px';
+        row.innerHTML = 'Item Type: <select name="item_type" required>{item_options}</select> '
+            + 'Work Description: <input type="text" name="work_description"> '
+            + 'Price: <input type="text" name="price" inputmode="decimal" oninput="this.value=this.value.replace(/[^0-9.]/g,\'\')" required> '
+            + '<button type="button" onclick="this.parentElement.remove()">Remove</button>';
+        container.appendChild(row);
+    }}
+    </script>
     """
 
 if __name__ == "__main__":
