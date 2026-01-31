@@ -1,0 +1,5 @@
+instance/
+uploads/
+.vs/
+__pycache__/
+*.pyc
