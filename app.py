@@ -1,4 +1,4 @@
-from flask import Flask, request
+from flask import Flask, request, Response
 from flask_sqlalchemy import SQLAlchemy
 import pandas as pd
 import os
@@ -134,8 +134,11 @@ def home():
     <div style="margin-bottom: 20px;">
         <a href="/add_pink_slip"><button type="button">Add A Pink Slip</button></a>
     </div>
-    <div>
+    <div style="margin-bottom: 20px;">
         <a href="/records"><button type="button">View All Records</button></a>
+    </div>
+    <div>
+        <a href="/export"><button type="button">Export CSV</button></a>
     </div>
     """
 
@@ -459,7 +462,7 @@ def add_pink_slip():
     <form method="POST">
         <fieldset>
             <legend>Slip Info</legend>
-            Slip Number: <input type="text" name="slip_number" inputmode="numeric" pattern="\d{6}" maxlength="6" oninput="this.value=this.value.replace(/\D/g,'')" required><br>
+            Slip Number: <input type="text" name="slip_number" inputmode="numeric" pattern="[0-9]{{6}}" maxlength="6" oninput="this.value=this.value.replace(/[^0-9]/g,'')" required><br>
             First Initial: <input type="text" name="first_initial" maxlength="1" pattern="[A-Za-z]" title="One letter only" oninput="this.value=this.value.replace(/[^A-Za-z]/g,'')" required><br>
             Last Name: <input type="text" name="last_name" pattern="[A-Za-z \\-']+" title="Letters, spaces, hyphens, and apostrophes only" oninput="this.value=this.value.replace(/[^A-Za-z \\-']/g,'')" required><br>
             Phone: <input type="text" name="phone" pattern="[0-9()\\- ]+" title="Numbers, parentheses, and dashes only" oninput="this.value=this.value.replace(/[^0-9()\\- ]/g,'')" required><br>
@@ -502,6 +505,20 @@ def add_pink_slip():
     }}
     </script>
     """
+
+@app.route("/export")
+def export():
+    slips_df = pd.read_sql_query('SELECT * FROM pink_slip', db.engine)
+    items_df = pd.read_sql_query('SELECT * FROM pink_slip_item', db.engine)
+
+    merged = items_df.merge(slips_df, left_on='slip_id', right_on='id', suffixes=('_item', '_slip'))
+    export_df = merged[['slip_number', 'first_initial', 'last_name', 'phone',
+                         'date_received', 'due_date', 'due_time', 'item_type',
+                         'work_description', 'price', 'total_amount']]
+
+    csv_data = export_df.to_csv(index=False)
+    return Response(csv_data, mimetype='text/csv',
+                    headers={'Content-Disposition': 'attachment; filename=pink_slips.csv'})
 
 if __name__ == "__main__":
     with app.app_context():
